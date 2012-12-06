@@ -404,7 +404,7 @@ class LogikGeneratorClass:
             self.KOGW['hsip'] = configparse.get('kogw','hsip')
             self.KOGW['gwport'] = configparse.getint('kogw','gwport')
             self.KOGW['gwsecret'] = configparse.get('kogw','gwsecret')
-        except ConfigParser.NoOptionError:
+        except (ConfigParser.NoOptionError,ConfigParser.NoSectionError):
             pass
 
         #print self.KOGW
