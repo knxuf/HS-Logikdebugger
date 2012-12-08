@@ -809,7 +809,7 @@ class LogikGeneratorClass:
                                         self.__sendKOGW(_iko,_result)
                                 
                         _result = result
-                        for _ac in xrange(1, len(self.localVars['AC']) -1 ):
+                        for _ac in xrange(1, len(self.localVars['AC']) ):
                             if self.localVars['AC'][_ac] == 1:
                                 console("** AC[%s] <> 0 schreibe AN[%s] %r" % ( _ac,_ac, self.localVars['AN'][_ac] ))
                                 self.localVars['AC'][_ac] = 0
