@@ -822,7 +822,7 @@ class LogikGeneratorClass:
                         
                         if formel['pinOffset'] > 0:
                             _pin = formel['pinOffset']
-                            if offset:
+                            if offset >0:
                                 try:
                                     self.Offset[_pin][0] =  time.time() + offset
                                     self.Offset[_pin][1] = _result
@@ -834,11 +834,13 @@ class LogikGeneratorClass:
                                     
                                     #except:
                                         #pass
-                                    console("*** setze Offset: %r" % (_t))
-                                    console("*** nächster start: %r" % (time.localtime(time.time()+offset)))
+                                    console("*** setze Offset %s: %r" % (_pin,_t))
+                                    console("*** nächster start: %s (%s sec)" % (time.strftime("%H:%M:%S %d.%m.%Y", time.localtime(time.time()+offset)), offset))
                                 except:
                                     console("*** Offset Fehler: Wert: %r" % offset)
                                     __import__('traceback').print_exc(file=__import__('sys').stdout)
+                            else:
+                                console("Offset %s gelöscht" % (_pin,))
                         
                         if formel['dobreak'] == 1:
                             console("*** Ausführung nach Formelzeile abgebrochen ***")
