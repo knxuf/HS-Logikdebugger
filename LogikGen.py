@@ -812,6 +812,7 @@ class LogikGeneratorClass:
                         for _ac in xrange(1, len(self.localVars['AC']) ):
                             if self.localVars['AC'][_ac] == 1:
                                 console("** AC[%s] <> 0 schreibe AN[%s] %r" % ( _ac,_ac, self.localVars['AN'][_ac] ))
+                                self.localVars['AA'][_ac] = self.localVars['AN'][_ac]
                                 self.localVars['AC'][_ac] = 0
                                 
                         if formel['pinSpeicher'] > 0:
@@ -1280,7 +1281,19 @@ def register(_action):
         _winreg.SetValue(_winreg.HKEY_CLASSES_ROOT,r"hsl_auto_file\shell\%s\command" % _keyname,_winreg.REG_SZ,_x)
         _winreg.SetValue(_winreg.HKEY_CLASSES_ROOT,r".hsl",_winreg.REG_SZ,"hsl_auto_file")
 
-    
+
+class Tee(object):
+    def __init__(self, name, mode):
+        self.file = open(name, mode)
+        self.stdout = sys.stdout
+        self.encoding = self.stdout.encoding
+        sys.stdout = self
+    def __del__(self):
+        sys.stdout = self.stdout
+        self.file.close()
+    def write(self, data):
+        self.file.write(data)
+        self.stdout.write(data)
 def parseCommandLine():
     _cmds = []
     configFile = sys.path[0]+"\LogikGen.config"
@@ -1288,7 +1301,7 @@ def parseCommandLine():
     
     import getopt
     
-    opts, args = getopt.getopt(sys.argv[1:],"a:nn:i:dg",["autorun=","new=","import=","register","debug","b64decode","config="])
+    opts, args = getopt.getopt(sys.argv[1:],"a:nn:l:i:dg",["autorun=","new=","import=","log=","register","debug","b64decode","config="])
     for opt,arg in opts:
         if opt in ("-i","--import"):
             if os.path.isfile(arg):
@@ -1308,6 +1321,9 @@ def parseCommandLine():
                 _logiknum = int(_hslinfo[0][0])
                 _logikname = _hslinfo[0][1]
             _cmds.append("create")
+
+        elif opt in ("-l","--log"):
+            Tee(arg,"a+")
 
         elif opt in ("-d","--debug"):
             _cmds.append("debug")
