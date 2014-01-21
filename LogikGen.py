@@ -185,6 +185,15 @@ class HSIKOdummy:
 
 __old_import__ = __import__
 
+class hs_timer(threading._Timer):
+    def __init__(self,interval,function):
+        self.starttime = time.strftime("%H:%M:%S",time.localtime())
+        self.calctime = time.time() + interval
+        threading._Timer.__init__(self,interval, function)
+
+    def get_time(self):
+        return "start: %s remain %.2f s" % ( self.starttime,self.calctime - time.time() )
+
 class hs_queue_queue(Queue.Queue):
     def put(self,item):
         Queue.Queue.put(self,[time.time(),item])
@@ -546,6 +555,7 @@ class LogikGeneratorClass:
             if _thread <> threading.currentThread():
                 try:
                     print "kill Thread: %r" % (_thread.name)
+                    _thread.cancel()
                     _thread._Thread__stop()
                     _thread.join(2)
                 except:
@@ -577,6 +587,9 @@ class LogikGeneratorClass:
             elif _lcmd.startswith("show"):
                 for v in sorted(self.localVars):
                     console("%s: %r" % (v,self.localVars[v]))
+                for t in self.localVars['Timer']:
+                  if t[0]:
+                      console("%s: %s (%s)" % (t[2].name,time.strftime("%H:%M:%S",time.localtime(t[0])),t[2].get_time()))
             elif _lcmd.startswith("connect"):
                 self.connectKOGW()
             elif _lcmd.startswith("names"):
@@ -829,7 +842,7 @@ class LogikGeneratorClass:
                                     self.Offset[_pin][1] = _result
                                     _t = [_pin] + self.Offset[_pin]
                                     #try:
-                                    self.Offset[_pin][2] = threading.Timer(offset,self.TimerCalc)
+                                    self.Offset[_pin][2] = hs_timer(offset,self.TimerCalc)
                                     self.Offset[_pin][2].setName("OC["+str(_pin)+"]")
                                     self.Offset[_pin][2].start()
                                     
@@ -841,7 +854,16 @@ class LogikGeneratorClass:
                                     console("*** Offset Fehler: Wert: %r" % offset)
                                     __import__('traceback').print_exc(file=__import__('sys').stdout)
                             else:
+                                try:
+                                    self.Offset[_pin][2].cancel()
+                                    self.Offset[_pin][0] = None
+                                    self.Offset[_pin][1] = None
+                                    self.Offset[_pin][2] = None
+                                except:
+                                    console("Error stopping Timer %s" % (_pin,))
+                                    pass
                                 console("Offset %s gelöscht" % (_pin,))
+                                
                         
                         if formel['dobreak'] == 1:
                             console("*** Ausführung nach Formelzeile abgebrochen ***")
@@ -1294,9 +1316,10 @@ class Tee(object):
     def write(self, data):
         self.file.write(data)
         self.stdout.write(data)
+
 def parseCommandLine():
     _cmds = []
-    configFile = sys.path[0]+"\LogikGen.config"
+    configFile = os.path.join(sys.path[0],"LogikGen.config")
     argautorun = 0
     
     import getopt
@@ -1306,6 +1329,9 @@ def parseCommandLine():
         if opt in ("-i","--import"):
             if os.path.isfile(arg):
                 importfilename = arg
+                _configFile = os.path.join( os.path.dirname(arg), "LogikGen.config")
+                if os.path.isfile(_configFile):
+                    configFile = _configFile
                 _cmds.append("import")
             else:
                 if len(arg) <1:
