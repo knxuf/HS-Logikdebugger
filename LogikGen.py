@@ -551,6 +551,7 @@ class LogikGeneratorClass:
                 _t[2].cancel()
             except:
                 pass
+
         for _thread in threading.enumerate():
             if _thread <> threading.currentThread():
                 try:
@@ -963,7 +964,7 @@ class LogikGeneratorClass:
                         
                     Speicher = int(_defline[4])
                     for i in range(0,Speicher):
-                        self.Speicher.append({'value':None,'isalpha':False,'defined':False,'remanent':False})
+                        self.Speicher.append({'name':"%s" % (i+1,),'value':None,'isalpha':False,'defined':False,'remanent':False})
                         self.localVars['SN'].append(None)
                         self.localVars['SC'].append(False)
                         self.localVars['SA'].append(None)
@@ -997,6 +998,11 @@ class LogikGeneratorClass:
                             _value = unquote(_defline[2])
                     except ValueError:
                         _value = unquote(_defline[2])
+                    
+                    if self.Eingang[int(_defline[1])]['defined'] == True:
+                        console("*** Fehler *** Eingang %s wurde bereits definiert" % (_defline[1],))
+                        raise TypeError
+                    
                     self.Eingang[int(_defline[1])]['value'] = _value
                     self.Eingang[int(_defline[1])]['isalpha'] = _isalpha
                     self.Eingang[int(_defline[1])]['defined'] = True
@@ -1004,7 +1010,7 @@ class LogikGeneratorClass:
                     
                 except:
                     self.LogikError("5002",line,LineNum,console=console)
-                    self.exitall(1)
+                    self.exitall(-1)
         
             ## Speicher
             if line.startswith("5003|"):
@@ -1029,6 +1035,14 @@ class LogikGeneratorClass:
                         ## remove " '
                         _value = unquote(_defline[2])
                         _isalpha = True
+
+                    if  int(_defline[1]) >= len(self.Speicher) :
+                        console("*** Fehler *** Speicher %s nicht in 5001 definiert" %(_defline[1],))
+                        raise IndexError
+                    if self.Speicher[int(_defline[1])]['defined'] == True:
+                        console("*** Fehler *** Speicher %s wurde bereits definiert" % (_defline[1],))
+                        raise TyperError
+
                     self.Speicher[int(_defline[1])]['value'] = _value
                     self.Speicher[int(_defline[1])]['isalpha'] = _isalpha
                     self.Speicher[int(_defline[1])]['remanent'] = _isremanent
@@ -1036,7 +1050,7 @@ class LogikGeneratorClass:
                     self.localVars['SN'][int(_defline[1])] = _value
                 except:
                     self.LogikError("5003",line,LineNum,console=console)
-                    self.exitall(1)
+                    self.exitall(-1)
         
             ## Ausgänge
             if line.startswith("5004|"):
@@ -1062,6 +1076,10 @@ class LogikGeneratorClass:
                     except ValueError:
                         _value = unquote(_defline[2])
 
+                    if self.Ausgang[int(_defline[1])]['defined'] == True:
+                        console("*** Fehler *** Ausgang %s wurde bereits definiert" % (_defline[1],))
+                        raise TyperError
+
                     self.Ausgang[int(_defline[1])]['value'] = _value
                     self.Ausgang[int(_defline[1])]['round'] = int(_defline[3][0])==1
                     self.Ausgang[int(_defline[1])]['sbc'] = int(_defline[4][0])==1
@@ -1070,7 +1088,7 @@ class LogikGeneratorClass:
                     self.localVars['AN'][int(_defline[1])] = _value
                 except:
                     self.LogikError("5004",line,LineNum,console=console)
-                    self.exitall(1)
+                    self.exitall(-1)
 
             if line.startswith("5012|"):
                 line5012 += 1
@@ -1139,21 +1157,25 @@ class LogikGeneratorClass:
                       })
                 except:
                     self.LogikError("5012",line,LineNum,console=console)
-                    __import__('traceback').print_exc(file=__import__('sys').stdout)
+                    #__import__('traceback').print_exc(file=__import__('sys').stdout)
                     self.exitall(1)
 
             if not firstLogikLine:
                 self.LogikHeader.append(line)
         
-        if numIn <> len(self.Eingang)-1:
-            console("*** Fehler *** Nicht alle Eingänge sind definiert")
-            self.exitall(1)
-        if numOut <> len(self.Ausgang)-1:
-            console("*** Fehler *** Nicht alle Ausgänge sind definiert")
-            self.exitall(1)
-        if Speicher <> len(self.Speicher)-1:
-            console("*** Fehler *** Nicht alle Speicher sind definiert")
-            self.exitall(1)
+        #print numIn,line5002,self.Eingang
+        #if numIn <> len(self.Eingang)-1:
+        if numIn <> line5002:
+            console("*** Fehler *** Nicht alle Eingänge sind definiert (%s)" % (",".join(map(lambda x: x['name'],filter(lambda x: not x['defined'],self.Eingang[1:])))))
+            self.exitall(-1)
+        #if numOut <> len(self.Ausgang)-1:
+        if numOut <> line5004:
+            console("*** Fehler *** Nicht alle Ausgänge sind definiert (%s)" % (",".join(map(lambda x: x['name'],filter(lambda x: not x['defined'],self.Ausgang[1:])))))
+            self.exitall(-1)
+        #if Speicher <> len(self.Speicher)-1:
+        if Speicher <> line5003:
+            console("*** Fehler *** Nicht alle Speicher sind definiert (%s)" % (",".join(map(lambda x: x['name'],filter(lambda x: not x['defined'],self.Speicher[1:])))))
+            self.exitall(-1)
 
     def extcompile(self,compiler,code,desc): 
         from tempfile import mkstemp
