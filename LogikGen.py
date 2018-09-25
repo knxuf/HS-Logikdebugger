@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-# -*- coding: iso8859-1 -*-
+# -*- coding: iso-8859-1 -*-
 ## -----------------------------------------------------
-## Logik-Generator  V2.019
+## Logik-Generator  V2.021
 ## -----------------------------------------------------
 ## Copyright © 2011, knx-user-forum e.V, All rights reserved.
 ##
@@ -16,19 +16,25 @@
 ## You should have received a copy of the GNU General Public License along with this program;
 ## if not, see <http://www.gnu.de/documents/gpl-3.0.de.html>.
 
-LGTVERSION = 2.019
+LGTVERSION = 2.021
 
 #######################
 ### Changelog #########
 #######################
-## 2.019 * diverse Funktionen entfernt ;-)
+## 2.021 * PREEXEC für hsb hinzugefügt
+##       * TagList.GrpListAll hinzugefügt
+##       * iko Standalone + Attribute wie name,endpoint_description ... 
+##
+## 2.020 * fix _hslparser 5012 regex include spaces
+##
+## 2.019 * hsl20 Support
 ##
 ## 2.018 * füge diverse interne Funktionen hinzu
 ##
 ## 2.017 * entferne --register
 ##
-## 2.016 * **
-##       * **
+## 2.016 * XXXXXXXXXXXXXXXXXXXXX
+##       * XXXXXXXXXXXXXXXXXXXXX
 ##
 ## 2.015 * 'names' zeigt jetzt SN and Timer
 ##       * colorama Unterstützung für farbliche Ausgabe
@@ -97,33 +103,58 @@ LGTVERSION = 2.019
 ## 2.001 * Initial Release
 ##
 
-import codecs
 import sys
-import os
-import base64 
-import marshal
-import re
-try:
-    from hashlib import md5
-except ImportError:
-    import md5 as md5old
-    md5 = lambda x: md5old.md5(x)
-import inspect
-import types
-import signal
-import time
-from datetime import datetime
 import threading
-import socket
-import select
-import StringIO
-import ConfigParser
-#import popen2
-import random
-import zlib
-import zipfile
-import traceback
-import Queue
+
+STDOUT_MUTEX = threading.RLock()
+## Threadsafe STDOUT 
+class flushed_stdout(object):
+    MAXBUFFER = 1000
+    def __init__(self,stream):
+        self.stream = stream
+        self.buffer = []
+        self.pause = 0
+
+    def set_pause(self,pause):
+        try:
+            STDOUT_MUTEX.acquire()
+            self.pause = pause
+            if pause == 0 and len(self.buffer) > 0:
+                self.stream.writelines(self.buffer)
+                self.buffer = []
+        finally:
+            STDOUT_MUTEX.release()
+        
+
+    def write(self,msg):
+        try:
+            STDOUT_MUTEX.acquire()
+            if self.pause == 0:
+                self.stream.write(msg)
+                self.stream.flush()
+            else:
+                self.buffer.append(msg)
+                self.buffer = self.buffer[:1000]
+        finally:
+            STDOUT_MUTEX.release()
+
+    def writelines(self, lines):
+        try:
+            STDOUT_MUTEX.acquire()
+            if self.pause == 0:
+                self.stream.writelines(lines)
+                self.stream.flush()
+            else:
+                self.buffer += lines
+                self.buffer = self.buffer[:1000]
+        finally:
+            STDOUT_MUTEX.release()
+
+    def flush(self):
+        pass
+
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
 
 try:
     from colorama import init,Fore, Back, Style
@@ -149,6 +180,38 @@ except ImportError:
     Fore = Back = Style = AnsiCodes()
 
 
+
+sys.stdout = flushed_stdout(sys.stdout)
+
+import codecs
+import os
+import base64 
+import marshal
+import re
+import glob
+import getopt
+import hashlib
+import inspect
+import types
+import signal
+import time
+from datetime import datetime
+import socket
+import select
+import StringIO
+import ConfigParser
+#import popen2
+import random
+import zlib
+import zipfile
+import traceback
+import Queue
+import string
+import io
+import tokenize
+
+
+
 ##  Weil der HS zu viele alte Module erwartet ;) so einfach könnte auch der HS diese blöden Meldungen nicht an der Konsole zeigen.
 import warnings
 warnings.simplefilter("ignore",DeprecationWarning)
@@ -156,7 +219,7 @@ warnings.simplefilter("ignore",DeprecationWarning)
 ##############
 ### Config ###
 ##############
-DEBUG = True
+DEBUG = False
 SYNTAXHIGHLIGHT = True
 
 ## kleine Hilfsfunktionen
@@ -170,31 +233,32 @@ COLORINTERN = Fore.GREEN+Style.BRIGHT
 RE_SYSTEMLOG_FINDER = re.compile("<log>.*?</log>")
 RE_SYSTEMLOG_GRABBER = re.compile("<log>(?=.*<facility>(?P<facility>.*?)</facility>)(?=.*<severity>(?P<severity>.*?)</severity>)(?=.*<message>(?P<message>.*?)</message>).*</log>")
 
-RE_SYNTAX_HIGHLIGHT_COMMENT = re.compile("(^#.*?$|###.*?###)",re.MULTILINE)
+RE_SYNTAX_HIGHLIGHT_COMMENT = re.compile("(^#+.*?$|###.*?###)",re.MULTILINE)
 RE_SYNTAX_HIGHLIGHT_FUNCTIONS = re.compile(r"(\bprint|\btry:|\bexcept\b.*?:|\bfinally:|\bfor\b.*?in.*?:|\bwhile\b.*?:|\belif\b.*?:|\bif\b.*?:|\belse:|\band\b|\bor\b|\bTrue\b|\bFalse\b|\bNone\b|\bdict\b|\blist\b|\bint\b|\bfloat\b|\bstr\b|\blen\b)",re.MULTILINE)
 RE_SYNTAX_HIGHLIGHT_BFUNCTIONS = re.compile(r"(__import__\(.*?\)[\.\w+]+\b|\bdef\b.*?:|\bclass\b.*?:|\bfrom\b.*?import.*?$|\bimport\s.*?\bas\b\.*?$|\bimport\b.*?$|\blambda\b|\bcontinue\b|\breturn\b)",re.MULTILINE)
 RE_SYNTAX_HIGHLIGHT_MODULES = re.compile(r"(\b\w+\.[\.\w+]+\b)")
 RE_SYNTAX_HIGHLIGHT_HSVARS = re.compile(r"((?:[O|E|S|A][N|A|C]\[([0-9]{1,2})\])|\bEI\b|\bpItem\b)")
 
-
-STDOUT_MUTEX = threading.Lock()
-
 def console(msg,color=None):
     if type(msg) <> str:
         msg = str(msg)
+    if len(msg.strip(" \n")) == 0:
+        return
     if color:
-        msg = color + msg  + Style.RESET_ALL
-    try:
-        STDOUT_MUTEX.acquire()
-        print (msg.decode("latin1").encode(sys.stdout.encoding))
-    finally:
-        STDOUT_MUTEX.release()
+        msg = "\r{0}{1}{2}\r\n>> ".format(color, msg, Style.RESET_ALL)
+    else:
+        msg = "\r{0}\r\n>> ".format(msg)
+    sys.stdout.write (msg.decode("latin1").encode(sys.stdout.encoding)),
 
 def console_error(msg):
     console(msg,color=Fore.RED+Style.BRIGHT)
 
 def console_info(msg):
     console(msg,color=COLORINFO)
+
+def console_info_ko(msg):
+    if DEBUG:
+        console(msg,color=COLORINFO)
 
 def console_intern(msg):
     _color = COLORINTERN
@@ -233,6 +297,19 @@ def console_debug(msg):
     if DEBUG:
         console_code(msg,color=Fore.CYAN+Style.BRIGHT)
 
+def nocomment(s):
+    result = []
+    g = tokenize.generate_tokens(io.BytesIO(s).readline)  
+    for toknum, tokval, _, _, _  in g:
+        # print(toknum,tokval)
+        if toknum != tokenize.COMMENT:
+            result.append((toknum, tokval))
+    _result = tokenize.untokenize(result)
+    console_info("Remove all comments {0}/{1}".format(len(_result),len(s)))
+    return _result
+
+
+
 def unquote(text):
     ## entfernt die Anführungszeichen
     if type(text) <> str:
@@ -268,22 +345,30 @@ class dummy:
 
 class debug_dummy:
     
-    Version = "4.2.LOGIKDEBUGGER"
+    Version = "4.111.LOGIKDEBUGGER"
     def __init__(self):
         self.Daten = []
+        self.Index = {}
     def setErr(self,pException,pComment=''):
         console(Fore.RED + Style.BRIGHT + "Error:" + Fore.MAGENTA)
-        traceback.print_exception(pException[0],pException[1],pException[2],file=sys.stdout)
+        try:
+            STDOUT_MUTEX.acquire()
+            traceback.print_exception(pException[0],pException[1],pException[2],file=sys.stdout)
+        finally:
+            STDOUT_MUTEX.release()
         console_intern(pComment)
     def setErrDirekt(self,pText):
         console_error("Error: %r" % pText)
     def addGruppe(self,pGruppe,pItems):
         console_intern("addGruppe %r with Items %r" % (pGruppe,pItems))
+        self.Index[pGruppe[0]] = dict((_x[0],_x) for _x in pItems)
         self.Daten.append(pGruppe+[pItems,])
     def setWert(self,pGruppe,pToken,pWert):
         console_intern("setWert %s - %s to %s%r" % (pGruppe,pToken,Fore.YELLOW,pWert))
     def addWert(self,pGruppe,pToken,pWert):
         console_intern("addWert %s - %s to %s%r" % (pGruppe,pToken,Fore.YELLOW,pWert))
+    def addDauer(self,pGruppe,pToken,pWert):
+        console_intern("addDauer %s - %s to %s%r" % (pGruppe,pToken,Fore.YELLOW,pWert))
     def __str__(self):
         _ret = ""
         for _data in self.Daten:
@@ -296,21 +381,32 @@ class debug_dummy:
         
 
 class HSIKOdummy:
-    def __init__(self,LGT,attached_out):
+    def __init__(self,LGT,attached_out,name="",**kwargs):
         self.LGT = LGT
+        self.MC = LGT.MC
         self.Value = ''
+        if name:
+            self.name = name
+            self.endpoint_description = name
         self.Format = 22
+        self.ReadFlag = 1
         self.SpeicherID = 1
+        for _k,_v in kwargs.items():
+            setattr(self,_k,_v)
         self._attached_out = attached_out
         self.mutex = threading.Lock()
     def setWert(self,out,wert):
         try:
             self.mutex.acquire()
             self.Value = wert
-            console("** intern ** auf AN[%d]: %s%s" % (self._attached_out,Fore.YELLOW,repr(wert)))
-            self.LGT.setVar("AN",self._attached_out,wert)
+            if self.attached_out > 0:
+                console("** intern ** auf AN[%d]: %s%s" % (self._attached_out,Fore.YELLOW,repr(wert)))
+                self.LGT.setVar("AN",self._attached_out,wert)
+            else:
+                console("** intern ** auf iko[%s]: %s%s" % (getattr(self,"name",getattr(self,"RPCText","")),Fore.YELLOW,repr(wert)))
         finally:
             self.mutex.release()
+
     def getWert(self):
         try:
             self.mutex.acquire()
@@ -334,10 +430,10 @@ class hs_timer(threading._Timer):
         return "start: %s remain %.2f s" % ( self.starttime,self.calctime - time.time() )
 
 class hs_queue_queue(Queue.Queue):
-    def put(self,item):
-        Queue.Queue.put(self,[time.time(),item])
-    def get(self):
-        return Queue.Queue.get(self)[1]
+    def put(self,item,*args,**kwargs):
+        Queue.Queue.put(self,[time.time(),item],*args,**kwargs)
+    def get(self,*args, **kwargs):
+        return Queue.Queue.get(self,*args,**kwargs)[1]
 
 import posixpath
 import mimetypes
@@ -363,40 +459,73 @@ class ExtDatItem(object):
     def getQuadDaten(self):
         return open(self.source_file,"rb").read()
     def getDatenStream(self,stream):
-        steam.write(open(self.source_file,"rb").read())
+        stream.write(open(self.source_file,"rb").read())
     def getQuadDatenStream(self,stream):
-        steam.write(open(self.source_file,"rb").read())
+        stream.write(open(self.source_file,"rb").read())
 
 def dummy_return_all(self,*args,**kwargs):
     console_debug("called '{0}' with args [{1}]".format(traceback.extract_stack(None, 2)[0][2],args))
+
+class dummy_regex(object):
+    def search(*msg):
+        return True
 
 def addZyklustimer(self,logik,nextstart):
     import time
     _nextstart_time = time.localtime(nextstart)
     _seconds = nextstart - time.time() 
     console_debug("Set Timer {0} to {1} {2} seconds".format(logik,time.strftime("%H:%M:%S",_nextstart_time),_seconds))
+    for t in xrange(0,len(logik.OutOfset)):
+        if LGT.Offset[t+1][0] <> logik.OutOfset[t][0] and logik.OutOfset[t][0] > 0:
+            LGT.Offset[t+1][0] = logik.OutOfset[t][0]
+            LGT.Offset[t+1][1] = logik.OutOfset[t][1]
+            try:
+                LGT.Offset[t+1][2].cancel()
+            except:
+                pass
+            LGT.Offset[t+1][2] = hs_timer(_seconds,logik.MC.LGT.TimerCalc)
+            LGT.Offset[t+1][2].start()
     
 
 def taglist_setwert(self,FLAG,iko,value):
-    console_intern("*** setwert ** auf AN[{0}]: {1}{2}".format(iko._attached_out,Fore.YELLOW,value))
-    self.LGT.setVar("AN",iko._attached_out,value)
-    self.LGT.setVar("AC",iko._attached_out,0)
+    if iko._attached_out > 0:
+        console_intern("*** setwert ** auf AN[{0}]: {1}{2}".format(iko._attached_out,Fore.YELLOW,value))
+        self.LGT.setVar("AN",iko._attached_out,value)
+        self.LGT.setVar("AC",iko._attached_out,0)
+    else:
+        console("** setwert ** auf iko[%s]: %s%s" % (getattr(iko,"name",getattr(iko,"RPCText","")),Fore.YELLOW,repr(value)))
 
+
+def dummyThreadsigner(self,pName):
+    console_intern("*** SIGN THREAD {0} ***".format(pName))
 
 class hs_queue(object):
     Queue = hs_queue_queue
     hs_threading = threading
-  
+
+class hs_fkt(object):
+    GlobalMC = None
+    
+    @staticmethod
+    def SockConnect(pHost,pPort,pTo):
+        pass
+
+sys.modules['hs_threading'] = threading
 sys.modules['hs_queue'] = hs_queue
+sys.modules['hs_fkt'] = hs_fkt
 def __import__(module):
     console_debug("Lade Modul %r" % module)
-    if module in ['hs_queue','sys']:
+    if module in ['hs_queue','sys','hs_fkt']:
         print "FROM GLOBAL"
         return globals().get(module)
     return __old_import__(module)
 
+
 def get_local_ip():
-    _ip = socket.gethostbyname( socket.gethostname() )
+    try:
+        _ip = socket.gethostbyname( socket.gethostname() )
+    except:
+        _ip = "127"
     if _ip.startswith("127"):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('google.com', 0))
@@ -419,6 +548,22 @@ class LogikGeneratorClass:
         self.LogikName = "unamedLogik"
         self.LogikiName = self.LogikName
         self.LogikCat = ""
+
+        self.LOGIKVARS = {
+            "LOGIKNAME"         : "unbenannt",
+            "LOGIKID"           : "10001",
+            "LOGIKCATEGORY"     : "KNXUF",
+            "LOGIKVERSION"      : "1.00",
+            "LOGIKDESCRIPTION"  : "\n",
+            "LOGIKDEBUG"        : 0,
+            "LOGIKCOMPILEMODE"  : 1,
+            "COMPILERCHECK"     : "__import__('sys').version[:3] == '{0}'".format(sys.version[:3]),
+            "COMPILERVERSION"   : sys.version[:3],
+            "LOGIKNOW"          : time.strftime("%Y-%m-%d %H:%M"),
+            "LOGIKYEAR"         : time.strftime("%Y"),
+            "LOGIKFILENAME"     : "{LOGIKID}_{LOGIKNAME}"
+        }
+
         self.LogikHeader = []
         self.Eingang = [{'value':0}]
         self.Ausgang = [{'value':0}]
@@ -442,6 +587,7 @@ class LogikGeneratorClass:
         self.mutex = threading.RLock()
         ## some dummy Vars 
         _mc = HomerServerDummy()
+        hs_fkt.GlobalMC = _mc
         self.MC = _mc
         _mc.LGT = self
         _mc.SystemID = "0123456789ab"
@@ -456,8 +602,8 @@ class LogikGeneratorClass:
         _guiclient = dummy()
         _guiclient.BGList = { "DUMMYBG": [0,4321, "image/png" ] }
         _guiclient.IconList = { "DUMMYICO" : [20,1234, "image/png" ] }
-        _guiclient.BGHash = md5("")
-        _guiclient.IconHash = md5("")
+        _guiclient.BGHash = hashlib.md5("")
+        _guiclient.IconHash = hashlib.md5("")
         
         _mc.GUI.ClientKeyList = {
             "D1024V" : _guiclient
@@ -468,10 +614,16 @@ class LogikGeneratorClass:
         _mc.LogikList.ConnectList = []
         _mc.LogikList.calcLock = threading.RLock()
         
+        _mc.EIBTreiber = dummy()
+        _mc.EIBTreiber.BcuVersion = 2
+        _mc.EIBTreiber.BcuPhysAdr = 1
+        _mc.ThreadSign = types.MethodType(dummyThreadsigner,_mc)
+        
         ## TagList
         _mc.TagList = dummy()
         _mc.TagList.LGT = self
         _mc.TagList.TagList = {}
+        _mc.TagList.GrpListAll = {1 : HSIKOdummy(self,1)}
         _mc.TagList.setWert = types.MethodType(taglist_setwert,_mc.TagList) ## FIXME
         
         ## Zyklustimer
@@ -489,11 +641,13 @@ class LogikGeneratorClass:
         
         ## Default HS Resolver
         _mc.DNSResolver = dummy()
+        _mc.DNSResolver.NameServer = ["192.168.232.1"] #["8.8.8.8","8.8.4.4"]
         _mc.DNSResolver.getHostIP = socket.gethostbyname
         
         ## Debug
         _mc.Debug = debug_dummy()
 
+        _mc.ServerQueueGUI = Queue.Queue()
         
         ## HS Telefonbedienung
         _mc.TelefonInterface = dummy()
@@ -502,7 +656,7 @@ class LogikGeneratorClass:
         _HSself = HSLogikSelfDummy()
         _HSself.MC = _mc
         _HSself.ID = self.LogikNum
-        _HSself.makeCheckSum = lambda: md5(str(random.random())).hexdigest()
+        _HSself.makeCheckSum = lambda: hashlib.md5(str(random.random())).hexdigest()
         
         
         ## HS Logik dummy
@@ -519,9 +673,10 @@ class LogikGeneratorClass:
         _pItem.OutWert = []
         _pItem.InWert = []
         _pItem.OutOfset = []
-        _pItem.LogikItem = HSLogikItemDummy()
+        _pItem.LogikItem = _HSself
         _pItem.LogikItem.Speicher = []
         _pItem.LogikItem.AnzSpeicher = 0
+        _pItem.LogikItem.AnzOutput = 0
         
         _mc.LogikList.GatterList = {
             _pItem.ID : _pItem 
@@ -548,65 +703,6 @@ class LogikGeneratorClass:
         }
         self.globalVars = globals()
     
-    
-    def symbolize(self,LogikHeader,code):
-        symbols = {}
-        for i in re.findall(r"(?m)^500([234])[|]([0-9]{1,}).*[@][@](.*)\s", LogikHeader):
-            varName=((i[0]=='2') and 'E') or ((i[0]=='3') and 'S') or ((i[0]=='4') and 'A')
-            isunique=True
-            try:
-                type(symbols[i[2]])
-                sym=i[2]
-                isunique=False
-            except KeyError:
-                pass
-            ## überprüft auch die alternativen Varianten
-            if re.match("[ACN]",i[2][-1:]):
-                try:
-                    type(symbols[i[2][:-1]])
-                    sym=i[2][:-1]
-                    isunique=False
-                except KeyError:
-                    pass
-            if isunique:
-                symbols[i[2]]=[varName,"["+i[1]+"]"]
-            else:
-                console_error("Variablen Kollision :" +repr(i[2])+" ist in " +repr(symbols[sym]) + " und  "+ varName +"["+i[1]+"] vergeben")
-                self.exitall(1)
-
-        ## Symbole wieder entfernen
-        LogikHeader=re.sub("[@][@]\w+", "",LogikHeader)
-
-        #im Code tauschen
-        for i in symbols.keys():
-            code=[code[0],re.sub("[\@][\@]"+i+"([ACN])",symbols[i][0]+"\\1"+symbols[i][1],code[1]),re.sub("[\@][\@]"+i+"([ACN])",symbols[i][0]+"\\1"+symbols[i][1],code[2])]
-            code=[code[0],re.sub("[\@][\@]"+i+"",symbols[i][0]+"N"+symbols[i][1],code[1]),re.sub("[\@][\@]"+i+"",symbols[i][0]+"N"+symbols[i][1],code[2])]
-        return LogikHeader,code
-    
-    def commentCode(self,code):
-        return "##########################\n###### Quelltext: ########\n##########################"+"\n##".join(code.split("\n"))+"\n"
-        
-    def enableDebug(self,code):
-        return re.sub("###DEBUG###","",code)
-        
-    def removeComments(self,code):
-        codelist=code.split("\n")
-        removelist=[]
-        lencode=len(codelist)-1
-        for i in range(1,lencode):
-            codeline=codelist[lencode-i].lstrip(" \t")
-            if len(codeline)>0:
-                if codeline[0]=='#':
-                    removelist.insert(0,"REMOVED: ("+str(lencode-i)+") "+codelist.pop(lencode-i))
-            else:
-                codelist.pop(lencode-i)
-        console_info("Removed" )
-        console("\n".join(removelist))
-        return "\n".join(codelist)
-    
-    def compileMe(self,code):
-        pass
-    
     def readConfig(self,configFile):
         global DEBUG
         self.Licences = {}
@@ -614,17 +710,24 @@ class LogikGeneratorClass:
         configparse.read(configFile)
         #for _lic in configparse.options("licences"):
         #    self.Licences[_lic] = configparse.get("licences",_lic)
-        console_info("Looking for %s%r%s Config" % (Fore.GREEN,self.LogikNum,COLORINFO))
+        _setoptions = {}
+        if self.LogikNum == 10100:
+            console_info("Looking for global Config")
+        else:
+            console_info("Looking for %s%r%s Config" % (Fore.GREEN,self.LogikNum,COLORINFO))
         try:
             DEBUG = configparse.getboolean('default','debug')
+            _setoptions["DEBUG"] = str(DEBUG)
         except (ConfigParser.NoOptionError,ConfigParser.NoSectionError):
             pass
         try:
             self.AutoRun = configparse.getboolean('default','autorun')
+            _setoptions["AUTORUN"] = str(self.AutoRun)
         except (ConfigParser.NoOptionError,ConfigParser.NoSectionError):
             pass
         try:
             self.hsupload_dir = "{0}\\".format(configparse.get('default','hsupload').rstrip("\\"))
+            _setoptions["HSUPLOAD"] = self.hsupload_dir
         except (ConfigParser.NoOptionError,ConfigParser.NoSectionError):
             pass
 
@@ -632,14 +735,27 @@ class LogikGeneratorClass:
             console_info("Found Config for %s%r%s" % (Fore.GREEN,self.LogikNum,COLORINFO))
             try:
                 DEBUG = configparse.getboolean(str(self.LogikNum),'debug')
+                _setoptions["DEBUG"] = str(DEBUG)
             except ConfigParser.NoOptionError:
                 pass
             try:
                 self.AutoRun = configparse.getboolean(str(self.LogikNum),'autorun')
+                _setoptions["AUTORUN"] = str(self.AutoRun)
             except ConfigParser.NoOptionError:
                 pass
             try:
                 self.AutoConnect = configparse.getboolean(str(self.LogikNum),'autoconnect')
+                _setoptions["AUTOCONNECT"] = str(self.AutoConnect)
+            except ConfigParser.NoOptionError:
+                pass
+
+            try:
+                if configparse.getboolean(str(self.LogikNum),'admin'):
+                    if sys.platform == "win32":
+                        import ctypes
+                        if not ctypes.windll.shell32.IsUserAnAdmin():
+                            ctypes.windll.shell32.ShellExecuteW(None,u"runas",unicode(sys.executable),unicode(" ".join(['"{0}"'.format(_x) for _x in sys.argv[:]])),None,8)
+                            sys.exit(0)
             except ConfigParser.NoOptionError:
                 pass
 
@@ -669,8 +785,11 @@ class LogikGeneratorClass:
             self.KOGW['hsip'] = configparse.get('kogw','hsip')
             self.KOGW['gwport'] = configparse.getint('kogw','gwport')
             self.KOGW['gwsecret'] = configparse.get('kogw','gwsecret')
+            _setoptions["KOGW"] = "{0}:{1}".format(self.KOGW['hsip'],self.KOGW['gwport'])
         except (ConfigParser.NoOptionError,ConfigParser.NoSectionError):
             pass
+        if _setoptions:
+            console_debug("\n".join(["{0}:{1}".format(k,v) for k,v in _setoptions.iteritems()]))
 
         #print self.KOGW
 
@@ -683,9 +802,6 @@ class LogikGeneratorClass:
         
         #print sys.executable
 
-    
-    def getHeader(self):
-        return "# -*- coding: iso8859-1 -*-"
 
     def showHSLhelp(self):
         return ""
@@ -757,6 +873,7 @@ class LogikGeneratorClass:
                         #addr = "%d/%d/%d" % ((address >> 11) & 0xff, (address >> 8) & 0x07, (address) & 0xff)
                         _io = self.KOGWInObj.get(address,None)
                         if _io:
+                            console_info_ko("KO-Gateway Eingang {0}: Wert: {1}".format(_io,info[2]))
                             self.setVar("EN",_io,info[2])
                             ## nicht beim INIT
                             if self.AutoRun and info[0] <> "2":
@@ -827,24 +944,25 @@ class LogikGeneratorClass:
                         _thread.cancel()
                     else:
                         _thread._Thread__stop()
-                        console_error("--> killed")
+                        console_error("--> killed thread: {0}".format(_thread.name))
                     _thread.join(2)
                 except:
                     traceback.print_exc(file=sys.stdout)
                     print ("Failed")
 
         ## Farben wiederherstellen
-        print "** CLEANUP **"
+        console( "** CLEANUP **")
         if hasattr(sys.stdout,"TEE"):
             sys.stdout = sys.stdout.stdout
-        print Fore.WHITE,Back.BLACK,Style.RESET_ALL,
+        #print Fore.WHITE,Back.BLACK,Style.RESET_ALL,
         if hasattr(os,"kill"):
             #print ("raise SIGTERM")
             _pid = os.getpid()
             os.kill(_pid,signal.SIGTERM)
         time.sleep(0.5)
 
-        sys.exit(int(_r <> 0))
+        #sys.exit(int(_r <> 0))
+        raise SystemExit(int(_t <> 0))
 
 
     def LogikDebug(self):
@@ -868,205 +986,322 @@ class LogikGeneratorClass:
             self.LogikCalc()
         while True:
             try:
-                _cmd = raw_input(">> ")
+                _cmd = raw_input("\r>> ")
                 if hasattr(sys.stdout,"TEE") and len(_cmd) > 1 :
                     sys.stdout.log(">> " + _cmd)
             except (KeyboardInterrupt,SystemExit):
                 self.exitall(0)
                 
             _lcmd = _cmd.lower()
-            
-            if _lcmd.startswith("quit") or _lcmd.startswith("exit"):
-                self.exitall(0)
-                break
-            
-            elif _cmd == "":
-                continue
-            
-            elif _lcmd.startswith("show"):
-                for v in sorted(self.localVars):
-                    console_info("%s: %r" % (v,self.localVars[v]))
-                for t in self.localVars['Timer']:
-                  if t[0]:
-                      console_info("%s: %s (%s)" % (t[2].name,time.strftime("%H:%M:%S",time.localtime(t[0])),t[2].get_time()))
-            elif _lcmd.startswith("disconnect"):
-                self.disconnectKOGW()
-            elif _lcmd.startswith("connect"):
-                self.connectKOGW()
-            elif _lcmd.startswith("names"):
-                console_info("Systemstart: % d Remanent: %d" % (self.runStart,self.isRemanent))
-                try:
-                    console_info("-------- Eingänge ------------")
-                    for v in range(1,len(self.Eingang)):
-                        _iko = ""
-                        if self.Eingang[v]['ikos']:
-                            _iko = "[" + Fore.GREEN + repr(self.Eingang[v]['ikos']) + Fore.RESET + "]"
-                        console("EN[%d]: %s (%s) %s" % (v,self.Eingang[v]['name'],Fore.YELLOW + Style.BRIGHT + repr(self.localVars['EN'][v])[:50] + Style.RESET_ALL, _iko))
-                    console_info("-------- Ausgänge ------------")
-                    for v in range(1,len(self.Ausgang)):
-                        _iko = ""
-                        if self.Ausgang[v]['ikos']:
-                            _iko = "[" + Fore.GREEN + repr(self.Ausgang[v]['ikos']) + Fore.RESET + "]"
-                        console("AN[%d]: %s (%s) %s" % (v,self.Ausgang[v]['name'],Fore.YELLOW + Style.BRIGHT + repr(self.localVars['AN'][v])[:50]  + Style.RESET_ALL,_iko))
-                    console_info("-------- Speicher ------------")
-                    for v in range(1,len(self.Speicher)):
-                        console("SN[%d]: (%s)" % (v,Fore.YELLOW + Style.BRIGHT + repr(self.localVars['SN'][v])[:50] + Style.RESET_ALL))
-                    if len(self.Offset) > 1:
-                        console_info("-------- Timer ------------")
-                        for v in range(1,len(self.Offset)):
-                            console("ON[%d]: %s (%r)" % (v,Fore.YELLOW + Style.BRIGHT + repr(self.Offset[v][1])[:50] + Style.RESET_ALL,self.Offset[v][0] and time.strftime("%H:%M:%S",time.localtime(self.Offset[v][0]))))
-                except:
-                    console_error("*** Fehler ... ***")
-                    self.exitall(1)
-                    pass
-            
-            elif _lcmd.startswith("run"):    
-                self.LogikCalc()
-            
-            elif _lcmd.startswith("files"):
-                _args = _lcmd.split(" ")[1:]
-                if _args:
-                    _args = _args[0].upper()
-                else:
-                    _args = ""
-                _files = self.MC.GUI.ExtDatUrl.keys()
-                _files.sort()
-                _sum = 0
-                _count = 0
-                for _file in _files:
-                    if _file.startswith(_args):
-                        _fileobj = self.MC.GUI.ExtDatUrl.get(_file)
-                        _sum += _fileobj.DatLen
-                        _count += 1
-                        console_info("* {0: <50} {1:>7,.0f} {2}".format(_file,_fileobj.DatLen,_fileobj.Typ.split("\n")[0]))
-                if _count > 1:
-                    console_info("*"*40)
-                    console_info("{0} Files  {1:,.2f} KB".format(_count,1.0 * _sum / 1024))
-            elif _lcmd.startswith("cat "):
-                _args = _lcmd.split(" ")[1:]
-                if _args:
-                    _args = _args[0]
-                    _file = self.MC.GUI.ExtDatUrl.get(_args.upper())
-                    if not _file:
-                        console_error("Datei nicht gefunden")
-                    else:
-                        print _file.getDaten()
-            elif _lcmd.startswith("formel"):
-                _args = _lcmd.split(" ")
-                _range = 10
-                try:
-                    _limit = int(_args[1])
-                except (IndexError,ValueError):
-                    _limit = None
-                for line in self.Formel:
-                    console_code("[{0:^4}] {1}".format(line.get("line"),line.get("rawline","###")))
-                    if line.get("bytecode"):
-                        _blines = line.get("bytecode").split("\n")
-                        for _blinenum in xrange(len(_blines)):
-                            if not _limit or ((_limit - _range) <= (_blinenum + 1)  <= (_limit + _range)):
-                                console_code("{0:<6} {1}".format(_blinenum + 1,_blines[_blinenum]),color=(Fore.GREEN if (_blinenum + 1) <> _limit else Fore.RED))
-            
-            elif _lcmd.startswith("autorun"):    
-                _sw = re.findall("autorun[=\s]?(\d)",_lcmd)
-                if _sw:
-                    _sw = (int(_sw[0]) == 1)
-                self.AutoRun = _sw
-
-            elif _lcmd.startswith("debug"):    
-                global DEBUG
-                _sw = re.findall("debug[=\s]?(\d)",_lcmd)
-                if _sw:
-                    _sw = int(_sw[0]) == 1
-                DEBUG = _sw
-
-            elif _lcmd.startswith("help") or _cmd.startswith("hilfe"):
-                console("\n")
-                console_info("Logik Debugger Hilfe")
-                console_info("--------------------\n")
-                console_info("'quit' oder 'exit' zum beenden")
-                console_info("'show' um die Variablen anzuzeigen")
-                console_info("'names' zeigt die Namen der Ein-/Ausgänge an")
-                console_info("'run' um die Logik auszuführen")
-                console_info("'autorun [0/1]' autorun ein/aus")
-                console_info("'timer 1' lässt Timer OC[1]/ON[1] ablaufen")
-                console_info("'connect' verbinden zum definierten KO Gateway")
-                console_info("'exec [code]' ausführen von python Code innerhalb der Logik")
-                console_info("'EN[1]=23' um Eingang 1 den Wert 23 zu setzen")
-                console_info("-- es können EI,EN,SN,AN,ON sowie EC,SC,AC,OC als auch EA,SA,AA")
-                console_info("-- geändert werden. Bei den ersten wird automatisch das jeweilige xC gesetzt")
-                console("\n")
-            elif _lcmd.startswith("exec "):
-                try:
-                    print Fore.YELLOW
-                    eval(compile(_cmd[5:],"ldebug","exec"),self.globalVars,self.localVars)
-                except:
-                    print Fore.RED
-                    traceback.print_exc(file=sys.stdout)
-                print Style.RESET_ALL
-
-            elif _lcmd.startswith("print ") or _lcmd.startswith("import "):
-                try:
-                    print Fore.YELLOW
-                    eval(compile(_cmd,"ldebug","exec"),self.globalVars,self.localVars)
-                except:
-                    print Fore.RED
-                    traceback.print_exc(file=sys.stdout)
-                print Style.RESET_ALL
-                    
-            elif _lcmd.startswith("timer"):
-                t = re.findall("\d+",_cmd)
-                if t:
-                    t=int(t[0])
-                    if t < 1:
-                        continue
-                    _v = self.Offset[t][1]
-                    try:
-                        self.Offset[t][2].cancel()
-                    except:
-                        pass
-                    #self.Offset[t] = (time.time()-1,_v)
-                    self.Offset[t][0] = time.time()-1
-                    console_info("Set Offset: %r" % (self.Offset[t],))
-                    if self.AutoRun:
-                        self.LogikCalc()
-                else:
-                    console_info("-------- Timer ------------")
-                    for o in xrange(1,len(self.Offset)):
-                        console("%d: Timer ON[%d]: %s (%s)" % (o,o,time.strftime("%H:%M:%S",time.localtime(self.Offset[o][0])),repr(self.Offset[o][1])[:40]))
-            elif _lcmd.startswith("ei="):
-                if _cmd[3] == "1":
-                    self.localVars['EI'] = 1
-                else:
-                    self.localVars['EI'] = 0
-            elif _lcmd.strip() == "":
-                pass
-            else:
-                _var = re.findall("^([O|E|S|A|o|e|s|a][N|n|A|a|C|c])[\[]?([0-9]{1,2})[\]]?=(.*)",_cmd)
-                if _var:
-                    _vname,_vnum,_val = _var[0]
-                    _vnum = int(_vnum)
-                    _vname = _vname.upper()
-                    if _val.startswith("$IKO$"):
+            try:
+                if _lcmd.startswith("quit") or _lcmd.startswith("exit"):
+                    self.exitall(0)
+                    break
+                
+                elif _cmd == "":
+                    continue
+                
+                elif _lcmd.startswith("show"):
+                    for v in sorted(self.localVars):
+                        console_info("%s: %r" % (v,self.localVars[v]))
+                    for t in self.localVars['Timer']:
+                      if t[0]:
+                          console_info("%s: %s (%s)" % (t[2].name,time.strftime("%H:%M:%S",time.localtime(t[0])),t[2].get_time()))
+                elif _lcmd.startswith("disconnect"):
+                    self.disconnectKOGW()
+                elif _lcmd.startswith("connect"):
+                    self.connectKOGW()
+                elif _lcmd.startswith("names"):
+                    _search = _lcmd[5:].strip()
+                    if len(_search) > 0:
                         try:
-                            #_iko = (lambda x: (lambda y: int(y[0]) <<11 | int(y[1]) << 8 | int(y[2]))(x.split("/")))(_val[5:])
-                            _iko = str2grp(_val[5:])
-                            if _vname == "EN":
-                                self.KOGWInObj[_iko] = _vnum
-                                self.Eingang[_vnum]['ikos'].append(_val[5:])
-                                console_info("** Setze IKO %s auf EN[%d]" % (_val[5:],_vnum))
-                            elif __vname == "AN":
-                                self.Ausgang[_vnum]['ikos'].append(_val[5:])
-                                console_info("** Setze IKO %s auf AN[%d]" % (_val[5:],_vnum))
-                        except:
-                            console(Fore.RED + Style.BRIGHT)
-                            traceback.print_exc(file=sys.stdout)
-                            console(Style.RESET_ALL)
+                            _search = "[AESO]N\[{0}\]".format(int(_search))
+                        except ValueError:
                             pass
+                        if _search.startswith("!"):
+                            ## negativ
+                            _search = "(?s)^((?{0}).)*$".format(_search)
+                        _search = re.compile(_search,re.I)
                     else:
-                        self.setVar(_vname,_vnum,_val.decode(sys.stdout.encoding).encode('latin1').decode('string-escape'))
+                        _search = dummy_regex()
+                    console_info("Systemstart: % d Remanent: %d" % (self.runStart,self.isRemanent))
+                    try:
+                        console_info("-------- Eingänge ------------")
+                        for v in range(1,len(self.Eingang)):
+                            _iko = ""
+                            if self.Eingang[v]['ikos']:
+                                _iko = "[" + Fore.GREEN + repr(self.Eingang[v]['ikos']) + Fore.RESET + "]"
+                            _out = "EN[%d]: %s (%s) %s" % (v,self.Eingang[v]['name'],Fore.YELLOW + Style.BRIGHT + repr(self.localVars['EN'][v])[:50] + Style.RESET_ALL, _iko)
+                            if _search.search(_out):
+                                console(_out)
+                        console_info("-------- Ausgänge ------------")
+                        for v in range(1,len(self.Ausgang)):
+                            _iko = ""
+                            if self.Ausgang[v]['ikos']:
+                                _iko = "[" + Fore.GREEN + repr(self.Ausgang[v]['ikos']) + Fore.RESET + "]"
+                            _out = "AN[%d]: %s (%s) %s" % (v,self.Ausgang[v]['name'],Fore.YELLOW + Style.BRIGHT + repr(self.localVars['AN'][v])[:50]  + Style.RESET_ALL,_iko)
+                            if _search.search(_out):
+                                console(_out)
+                        console_info("-------- Speicher ------------")
+                        for v in range(1,len(self.Speicher)):
+                            _out = "SN[%d]: (%s)" % (v,Fore.YELLOW + Style.BRIGHT + repr(self.localVars['SN'][v])[:50] + Style.RESET_ALL)
+                            if _search.search(_out):
+                                console(_out)
+                        if len(self.Offset) > 1:
+                            console_info("-------- Timer ------------")
+                            for v in range(1,len(self.Offset)):
+                                _out = "ON[%d]: %s (%r)" % (v,Fore.YELLOW + Style.BRIGHT + repr(self.Offset[v][1])[:50] + Style.RESET_ALL,self.Offset[v][0] and time.strftime("%H:%M:%S",time.localtime(self.Offset[v][0])))
+                                if _search.search(_out):
+                                    console(_out)
 
+                    except:
+                        console_error("*** Fehler ... ***")
+                        self.exitall(1)
+                        pass
+                
+                elif _lcmd.startswith("run"):    
+                    self.LogikCalc()
+                
+                elif _lcmd.startswith("files"):
+                    _args = _lcmd.split(" ")[1:]
+                    _sorttypes = {
+                        "-n"    : lambda x: x[0],
+                        "-s"    : lambda x: x[1],
+                        "-t"    : lambda x: x[2],
+                        "-d"    : lambda x: "{0}{1}".format(9 - x[0].count("/"),x[0])
+                    }
+                    _sort = "-d"
+                    _search = dummy_regex()
+                    if _args:
+                        if _args[0] in ["-n","-s","-t","-d"]:
+                            _sort = _args[0]
+                            _args.pop(0)
+                        if _args:
+                            _search = re.compile(_args[0].upper())
+                    #_files = self.MC.GUI.ExtDatUrl.keys()
+                    #_files.sort()
+                    _files = map(lambda x: (x[0],int(x[1].DatLen),x[1].Typ.split("\n")[0]),
+                        filter(
+                            lambda x,search=_search: search.search(x[0]),
+                            self.MC.GUI.ExtDatUrl.iteritems()
+                        )
+                    )
+                    _sum = sum(int(x[1]) for x in _files)
+                    _count = len(_files)
+                    _files = sorted(_files,key=_sorttypes.get(_sort))
+                    for _file in _files:
+                            console_info("* {0: <50} {1:>7,.0f} {2}".format(*_file))
+                    if _count > 1:
+                        console_info("*"*40)
+                        console_info("{0} Files  {1:,.2f} KB".format(_count,1.0 * _sum / 1024))
+                elif _lcmd.startswith("cat "):
+                    _args = _lcmd.split(" ")[1:]
+                    if _args:
+                        _args = _args[0]
+                        _file = self.MC.GUI.ExtDatUrl.get(_args.upper())
+                        if not _file:
+                            console_error("Datei nicht gefunden")
+                        else:
+                            print _file.getDaten()
+                elif _lcmd.startswith("formel"):
+                    _args = _lcmd.split(" ")
+                    _range = 10
+                    try:
+                        _limit = int(_args[1])
+                    except (IndexError,ValueError):
+                        _limit = None
+                    for line in self.Formel:
+                        console_code("[{0:^4}] {1}".format(line.get("line"),line.get("rawline","###")))
+                        if line.get("bytecode"):
+                            _blines = line.get("bytecode").split("\n")
+                            for _blinenum in xrange(len(_blines)):
+                                if not _limit or ((_limit - _range) <= (_blinenum + 1)  <= (_limit + _range)):
+                                    console_code("{0:<6} {1}".format(_blinenum + 1,_blines[_blinenum]),color=(Fore.GREEN if (_blinenum + 1) <> _limit else Fore.RED))
+                
+                elif _lcmd.startswith("save"):
+                    _filename = self.LOGIKVARS["LOGIKFILENAME"]
+                    _args = _lcmd.split(" ")
+                    if len(_args) > 1:
+                        _filename = _args[1].strip()
+                    
+                    if _filename[-4:-1] == ".hs": ## strip extension
+                        _filename = _filename[:-4]
+
+                    if os.path.isfile("{0}.hsb".format(_filename)):
+                        _raw = raw_input(("Datei {0}.hsb existiert bereits. Überschreiben (j/n/a)?".decode("latin1").encode(sys.stdout.encoding)).format(_filename)).strip().lower()
+                        if _raw == "a":
+                            continue
+                        if _raw == "n":
+                            _filename += "_{0}".format(time.strftime("%Y-%m-%d_%H_%M"))
+                    
+                    _raw = raw_input("als Datei {0}.hsb speichern (j/n)?".format(_filename)).strip().lower()
+                    if _raw != "j":
+                        console_info("Abbruch")
+                        continue
+
+                    with open("{0}.hsb".format(_filename),"wt") as _file:
+                        _file.write("{0}\n".format(self.hsblines[0]))
+                        for _key in ["LOGIKCATEGORY","LOGIKNAME","LOGIKID","LOGIKVERSION","LOGIKDESCRIPTION"]:
+                            _val = self.LOGIKVARS.get(_key)
+                            if _val:
+                                if _val.find("\n") > -1:
+                                    _file.write("{0}=\"\"\"\n{1}\n\"\"\"\n".format(_key,_val))
+                                else:
+                                    _file.write("{0}=\"{1}\"\n".format(_key,_val))
+
+                        for _line in self.hsblines[1:]:
+                            #if _line.startswith("5012"):
+                            #    break
+                            if _line.startswith("5000"):
+                                _line = re.sub("^5000\|\".*?\"(\|.*\|)\".*?\"$","5000|\"@LOGIKCATEGORY@\\\\\\\\@LOGIKNAME@\"\\1\"@LOGIKID@ - V@LOGIKVERSION@\"",_line)
+                            _file.write(_line.rstrip("\n").rstrip("\r") + "\n")
+
+                        #_file.write("\n".join([x.rstrip("\n").rstrip("\r") for x in filter(lambda x: not x.startswith("5012"),self.rawlines[1:])]))
+                        #_file.write("\n".join(self.hsblines[1:]))
+
+                elif _lcmd.startswith("build"):
+                    _filename = self.LOGIKVARS.get("LOGIKHSLFILENAME",self.LOGIKVARS.get("LOGIKFILENAME","unknonw.hsl"))
+                    _filename = _filename.format(**self.LOGIKVARS)
+                    _args = _lcmd.split(" ")
+                    if len(_args) > 1:
+                        _filename = _args[1].strip()
+                    
+                    if _filename[-4:-1] == ".hs": ## strip extension
+                        _filename = _filename[:-4]
+    
+                    if os.path.isfile("{0}.hsl".format(_filename)):
+                        _raw = raw_input("Datei {0}.hsl existiert bereits. Überschreiben (j/n/a)?".format(_filename)).strip().lower()
+                        if _raw == "a":
+                            continue
+                        if _raw == "n":
+                            _filename += "_{0}".format(time.strftime("%Y-%m-%d_%H_%M"))
+                    
+                    _raw = raw_input("als Datei {0}.hsl speichern (j/n)?".format(_filename)).strip().lower()
+                    if _raw != "j":
+                        console_info("Abbruch")
+                        continue
+                    
+                    self.build("{0}.hsl".format(_filename))
+                    
+                elif _lcmd.startswith("autorun"):    
+                    _sw = re.findall("autorun[=\s]?(\d)",_lcmd)
+                    if _sw:
+                        _sw = (int(_sw[0]) == 1)
+                    self.AutoRun = _sw
+
+                elif _lcmd.startswith("debug"):    
+                    global DEBUG
+                    _sw = re.findall("debug[=\s]?(\d)",_lcmd)
+                    if _sw:
+                        _sw = int(_sw[0]) == 1
+                    DEBUG = _sw
+
+                elif _lcmd.startswith("help") or _cmd.startswith("hilfe"):
+                    console("\n")
+                    console_info("Logik Debugger Hilfe")
+                    console_info("--------------------\n")
+                    console_info("'quit' oder 'exit' zum beenden")
+                    console_info("'save' generiert ein .hsb File aus der aktuellen Logik")
+                    console_info("'build' generiert ein .hsl File aus der aktuellen Logik")
+                    console_info("'show' um die Variablen anzuzeigen")
+                    console_info("'names [suchstring ... mit ! negiert]' zeigt die Namen der Ein-/Ausgänge/Speicher an")
+                    console_info("'files [-t (filetype) /-s (Größe)] [suchstring]' zeigt den Inhalt des ExtDatUrl (/opt) an")
+                    console_info("'cat Filename zeigt den Inhalt des unter ExtDatUrl (/opt) liegen Files an")
+                    console_info("'formel [linenumber] zeigt die Formeln an")
+                    console_info("'run' um die Logik auszuführen")
+                    console_info("'autorun [0/1]' autorun ein/aus")
+                    console_info("'debug [0/1]' schaltet Debugmeldungen ein/aus")
+                    console_info("'timer 1' lässt Timer OC[1]/ON[1] ablaufen")
+                    console_info("'connect' verbinden zum definierten KO Gateway")
+                    console_info("'disconnect' verbinden zum definierten KO Gateway trennen")
+                    console_info("'exec [code]' ausführen von python Code innerhalb der Logik")
+                    console_info("'-- print und import können auch ohne vorangestelltes exec ausgeführt werden")
+                    console_info("'EN[1]=23' um Eingang 1 den Wert 23 zu setzen")
+                    console_info("-- es können EI,EN,SN,AN,ON sowie EC,SC,AC,OC als auch EA,SA,AA")
+                    console_info("-- geändert werden. Bei den ersten wird automatisch das jeweilige xC gesetzt")
+                    console_info("-- kann auch mit en1= abgekürzt werden")
+                    console("\n")
+                elif _lcmd.startswith("exec "):
+                    try:
+                        _cmd = re.sub(r"(\b[OESAoesa][NnAaCc])[\[]?([0-9]{1,2})[\]]?",lambda x: "{0}[{1}]".format(x.group(1).upper(),x.group(2)),_cmd[5:])
+                        print Fore.YELLOW,
+                        eval(compile(_cmd,"ldebug","exec"),self.globalVars,self.localVars)
+                    except:
+                        print Fore.RED,
+                        traceback.print_exc(file=sys.stdout)
+                    print Style.RESET_ALL,
+
+                elif re.match("^(?:print|import|\w+\.\w+)[\s\(]\w*",_cmd):
+                    try:
+                        _cmd = re.sub(r"(\b[OESAoesa][NnAaCc])[\[]?([0-9]{1,2})[\]]?",lambda x: "{0}[{1}]".format(x.group(1).upper(),x.group(2)),_cmd)
+                        print Fore.YELLOW,
+                        eval(compile(_cmd,"ldebug","exec"),self.globalVars,self.localVars)
+                    except:
+                        print Fore.RED,
+                        traceback.print_exc(file=sys.stdout)
+                    print Style.RESET_ALL,
+                        
+                elif _lcmd.startswith("timer"):
+                    t = re.findall("\d+",_cmd)
+                    if t:
+                        t=int(t[0])
+                        if t < 1:
+                            continue
+                        _v = self.Offset[t][1]
+                        try:
+                            self.Offset[t][2].cancel()
+                        except:
+                            pass
+                        #self.Offset[t] = (time.time()-1,_v)
+                        self.Offset[t][0] = time.time()-1
+                        console_info("Set Offset: %r" % (self.Offset[t],))
+                        if self.AutoRun:
+                            self.LogikCalc()
+                    else:
+                        console_info("-------- Timer ------------")
+                        for o in xrange(1,len(self.Offset)):
+                            console("%d: Timer ON[%d]: %s (%s)" % (o,o,time.strftime("%H:%M:%S",time.localtime(self.Offset[o][0])),repr(self.Offset[o][1])[:40]))
+                elif _lcmd.startswith("ei="):
+                    if _cmd[3] == "1":
+                        self.localVars['EI'] = 1
+                    else:
+                        self.localVars['EI'] = 0
+                elif _lcmd.strip() == "":
+                    pass
                 else:
-                    console_error("*** unbekannter Befehl - tippe help für Hilfe *** ")
+                    _var = re.findall("^([O|E|S|A|o|e|s|a][N|n|A|a|C|c])[\[]?([0-9]{1,2})[\]]?=(.*)",_cmd)
+                    if _var:
+                        _vname,_vnum,_val = _var[0]
+                        _vnum = int(_vnum)
+                        _vname = _vname.upper()
+                        if _val.startswith("$IKO$"):
+                            try:
+                                #_iko = (lambda x: (lambda y: int(y[0]) <<11 | int(y[1]) << 8 | int(y[2]))(x.split("/")))(_val[5:])
+                                _iko = str2grp(_val[5:])
+                                if _vname == "EN":
+                                    self.KOGWInObj[_iko] = _vnum
+                                    self.Eingang[_vnum]['ikos'].append(_val[5:])
+                                    console_info("** Setze IKO %s auf EN[%d]" % (_val[5:],_vnum))
+                                elif _vname == "AN":
+                                    self.Ausgang[_vnum]['ikos'].append(_val[5:])
+                                    console_info("** Setze IKO %s auf AN[%d]" % (_val[5:],_vnum))
+                            except:
+                                console(Fore.RED + Style.BRIGHT)
+                                traceback.print_exc(file=sys.stdout)
+                                console(Style.RESET_ALL)
+                                pass
+                        else:
+                            self.setVar(_vname,_vnum,_val.decode(sys.stdout.encoding).encode('latin1').decode('string-escape'))
+
+                    else:
+                        console_error("*** unbekannter Befehl - tippe help für Hilfe *** ")
+            except (KeyboardInterrupt,SystemExit):
+                raise
+
+            except:
+                console_error("**** Fehler ****")
+                traceback.print_exc(file=sys.stdout)
+                console(Style.RESET_ALL)
             _cmd = None
     
     def setVar(self,_vname,_vnum,_val):
@@ -1132,8 +1367,6 @@ class LogikGeneratorClass:
         except TypeError:
             return ""
             
-        
-    
     def LogikCalc(self):
         try:
             self.mutex.acquire()
@@ -1303,10 +1536,24 @@ class LogikGeneratorClass:
         hslinfo = re.findall(".*(1[0-9][0-9][0-9][0-9])(?:_|\s)(.*?).hsl",hslfile)
         if hslinfo:
             self.LogikNum, self.LogikName = hslinfo[0]
+            self.LOGIKVARS["LOGIKID"] = self.LogikNum
+            self.LOGIKVARS["LOGIKNAME"] = self.LogikName
             self.LogikNum = int(self.LogikNum)
+
+        self.LOGIKVARS["LOGIKFILENAME"] = self.LOGIKVARS["LOGIKFILENAME"].format(**self.LOGIKVARS)
+        description = []
+        for _line in self.rawlines[:]:
+            if -1 > _line.find("5000|") < 2:
+                break
+            if _line.startswith("##"):
+                description.append(_line[2:].lstrip(" "))
+                self.rawlines.remove(_line)
+        if description:
+            self.LOGIKVARS["LOGIKDESCRIPTION"] = "".join(description)
         console_info("lade Baustein {0}".format(hslfile))
         self._HSLparser(self.rawlines)
-            
+        self.LOGIKVARS["LOGIKCATEGORY"] = self.LogikCat.rstrip("\\")
+
     def _HSLparser(self,lines,add_encrypted=False):
         numIn = numOut = 0
         firstLogikLine = False
@@ -1317,12 +1564,16 @@ class LogikGeneratorClass:
         line5004 = 0
         line5012 = 0
         LineNum = 0
-        if lines[0].find("-*- coding: iso8859-1 -*-") == -1 and not add_encrypted:
-            console_error("*** Warnung *** Encoding Zeile für iso8859-1 fehlt")
-            self.rawlines.insert(0,"# -*- coding: iso8859-1 -*-")
+        if lines[0].find("coding:") == -1 and not add_encrypted:
+            console_error("*** Warnung *** Encoding Zeile für iso-8859-1 fehlt")
+            lines.insert(0,"# -*- coding: iso-8859-1 -*-")
             self.Errors['warning'] += 1
-        
+        else:
+            lines[0] = "# -*- coding: iso-8859-1 -*-"
+
+        sourcelines = []
         for line in lines:
+            _b64 = None
             #line = line.decode("latin1","backslashreplace")
             line = re.sub("\r|\n","",line)
             LineNum +=1
@@ -1356,12 +1607,17 @@ class LogikGeneratorClass:
                         self.localVars['AA'].append(None)
                         self.localVars['pItem'].Ausgang.append([[],[HSIKOdummy(self,i+1)],[],[]])
                         self.localVars['pItem'].OutWert.append(None)
+                    versionfield = 5 + numIn + numOut
+                    if len(_defline) > versionfield:
+                        version = re.findall("[.\d]+[-_\w]*$",unquote(_defline[versionfield]))
+                        if version:
+                            self.LOGIKVARS["LOGIKVERSION"] = version[0]
                 except:
                     self.LogikError("5000",line,LineNum,console=console)
                     self.exitall(1)
                     
             ## HS Definitionszeile
-            if line.startswith("5001|"):
+            elif line.startswith("5001|"):
                 firstLogikLine = True
                 if line5001:
                     console_error("*** Fehler *** Die 5001er Zeile wurde mehrfach definiert")
@@ -1375,6 +1631,7 @@ class LogikGeneratorClass:
                     if numOut != int(_defline[2]):
                         console_error("*** 5001er und 5000er Ausgänge passen nicht ***")
                         self.exitall(1)
+                    self.localVars['pItem'].LogikItem.AnzOutput = numOut
                     numOffset = int(_defline[3])
                     for o in range(0,numOffset):
                         self.localVars['ON'].append(None)
@@ -1401,7 +1658,7 @@ class LogikGeneratorClass:
                     self.exitall(1)
 
             ## Eingänge
-            if line.startswith("5002|"):
+            elif line.startswith("5002|"):
                 firstLogikLine = True
                 line5002 += 1
                 try:
@@ -1432,6 +1689,7 @@ class LogikGeneratorClass:
                     self.Eingang[int(_defline[1])]['value'] = _value
                     self.Eingang[int(_defline[1])]['isalpha'] = _isalpha
                     self.Eingang[int(_defline[1])]['defined'] = True
+                    self.localVars['EA'][int(_defline[1])] = _value
                     self.localVars['EN'][int(_defline[1])] = _value
                     
                 except:
@@ -1439,7 +1697,7 @@ class LogikGeneratorClass:
                     self.exitall(-1)
         
             ## Speicher
-            if line.startswith("5003|"):
+            elif line.startswith("5003|"):
                 firstLogikLine = True
                 line5003 += 1
                 try:
@@ -1485,7 +1743,7 @@ class LogikGeneratorClass:
                     self.exitall(-1)
         
             ## Ausgänge
-            if line.startswith("5004|"):
+            elif line.startswith("5004|"):
                 firstLogikLine = True
                 line5004 += 1
                 try:
@@ -1522,10 +1780,10 @@ class LogikGeneratorClass:
                     self.LogikError("5004",line,LineNum,console=console)
                     self.exitall(-1)
 
-            if line.startswith("5012|"):
+            elif line.startswith("5012|"):
                 line5012 += 1
                 try:
-                    _defline = re.findall("^(5012)\|([0|1])\|\x22(.*?)\x22\|\x22(.*?)\x22\|\x22(.*?)\x22\|(\d+)\|(\d+)\|(\d+)\|(\d+)",line)
+                    _defline = re.findall("^(5012)\|([0|1])\|\x22(.*?)\x22\s*\|\x22(.*?)\x22\s*\|\x22(.*?)\x22\s*\|(\d+)\|(\d+)\|(\d+)\|(\d+)",line)
                     _b64 = None
                     if _defline:
                         _defline = _defline[0]
@@ -1553,16 +1811,26 @@ class LogikGeneratorClass:
                         _formel = "None"
                     else:
                         _formel = _defline[3]
-                    if _formel.startswith("eval(compile(__import__('base64').decodestring('"):
-                        _b64 = re.findall("decodestring\('(.*?)'\)",_formel)
+                    if _formel.startswith("eval(compile"):
+                        _b64 = re.findall("__import__\('base64'\)\.[\w]+\('(.*?)'\)",_formel)
+                        console_info("decode base64 code");
                         if _b64:
                             try:
                                 _b64 = base64.decodestring(_b64[0])
-                                line = line.replace(_formel,"###BYTECODE###")
+                                line = line.replace(_formel,"@BYTECODE@")
                             except:
-                                console_error("Bytecode konnte nicht entschlüsselt werden")
+                                console_error("Base64code konnte nicht entschlüsselt werden")
                                 
                                 _b64 = None
+                        if _formel.find("__import__('zlib').decompress(__import__('base64')") > 0 and _b64:
+                            console_info("ZLIB decompress code")
+                            try:
+                                _b64 = zlib.decompress(_b64)
+                            except:
+                                console_error("ZLIBCode konnte nicht entpackt werden")
+                            
+                    if _formel.startswith("eval(__import__('marshal').loads("):
+                        line = line.replace(_formel,"@BYTECODE@")
                     _formelCode = compile("# -*- coding: iso-8859-1 -*-\n" + _formel,"Line:"+str(LineNum),"eval")
                     if len(_defline[4])==0:
                         _offset = "None"
@@ -1603,8 +1871,15 @@ class LogikGeneratorClass:
                     #__import__('traceback').print_exc(file=__import__('sys').stdout)
                     self.exitall(1)
 
+            sourcelines.append(line)
+            if _b64:
+                sourcelines.append("@BYTECODESTART@")
+                sourcelines += _b64.split("\n")
+                sourcelines.append("@BYTECODEEND@")
+
             if not firstLogikLine:
                 self.LogikHeader.append(line)
+        self.hsblines = sourcelines
         
         if not add_encrypted:
             #print numIn,line5002,self.Eingang
@@ -1633,138 +1908,149 @@ class LogikGeneratorClass:
             console_error("*** {0} Warnungen gefunden ***".format(self.Errors['warning']))
 
     def build(self,fname):
-        console_info("Rebuild hsl as {0}".format(fname))
+        console_info("Build hsl as {0}".format(fname))
         with open(fname,"wt") as f:
             f.write("\n".join([x.rstrip("\n").rstrip("\r") for x in self.rawlines]))
 
-    def extcompile(self,compiler,code,desc): 
-        from tempfile import mkstemp
-        _basecode = ""
-        try:
-            try:
-                _fh,_fname = mkstemp(suffix='.tmp',prefix="LGT_compile-")
-                console("temporäre Datei '%s' erstellt" % _fname)
-                _fp = open(_fname,"w")
-                _fp.write(code)
-                _fp.close()
-                os.close(_fh)
-                #_cstdout,_cstdin,_cstderr = popen2.popen3(compiler + " -c \"import base64;import marshal;print base64.encodestring(marshal.dumps(compile(open(base64.decodestring('"+re.sub("\n","",base64.encodestring(_fname))+"')).read(),'"+desc+"','exec')))\"")
-                _basecode = _cstdout.read()
-                _err = _cstderr.read()
-                _cstdout.close()
-                _cstdin.close()
-                _cstderr.close()
-            except:
-                console_error("*** externer Compiler Fehler ***")
-                return False
-        finally:
-            os.remove(_fname)
-            console_debug("temporäre Datei '%s' gelöscht" % _fname)
-            return re.sub("\n","",_basecode)
+    def load(self,fname):
+        LOGIKNAME = re.findall("([\d]{5})_(.*?)[.]hsb",fname)
+        if LOGIKNAME:
+            self.LOGIKVARS["LOGIKID"],self.LOGIKVARS["LOGIKNAME"] = LOGIKNAME[0]
 
-    def createLGT(self):
-        lgtfile = "%d_%s.LGT"  % (self.LogikNum,self.LogikName)
+        self.LogikNum = int(self.LOGIKVARS["LOGIKID"])
+        self.LogikName = self.LOGIKVARS["LOGIKNAME"]
+        PREEXEC_REGEX = re.compile("^PREEXEC\s?=(?:[\"']{3}(.*?)[\"']{3}|([-]?\d+))\n",re.MULTILINE | re.DOTALL)
+        LOGIKVARSSEARCH_REGEX = re.compile("^(LOGIK\w+)\s?=(?:[\"']{1,3}(.*?)[\"']{1,3}|([-]?\d+))\n",re.MULTILINE | re.DOTALL)
+        INCLUDESEARCH_REGEX = re.compile("(?P<inline>^5012[|].*?[\"'])?(?:@INCLUDE:(?P<include>.*?)@).*", re.MULTILINE | re.DOTALL)
+        BYTECODESEARCH_REGEX = re.compile("^@BYTECODESTART@(.*?)^@BYTECODEEND@",re.MULTILINE | re.DOTALL)
+        CLEANUP_REGEX = re.compile("(?s)^((?!^(?:4999|5000|5001|5002|5003|5004|5012|#)).)*$",re.MULTILINE)
         
-        console_info("erstelle LGT Datei %s" % lgtfile)
-        
-        fp = codecs.open(lgtfile,"w")
-        
-        fp.write(self.getHeader()+"\n")
-        fp.write("\n\n## Using Logik Generator\n")
-        fp.write("from "+sys.argv[0][:-3]+" import *\n\n\n")
-        fp.write("LGT.Header(\"\"\"\n")
-        fp.write("\n".join(self.LogikHeader))
-        fp.write("\n\n")
-        ## Write 5000er
-        fp.write("5000|\"" + self.LogikCat + self.LogikName + "\"|" +str(int(self.isRemanent == 1))+"|" + str(len(self.Eingang[1:])) + "|\"" + "\"|\"".join([o['name'] for o in LGT.Eingang[1:]]) + "\"|" + str(len(self.Ausgang[1:])) + "|\"" + "\"|\"".join([o['name'] for o in LGT.Ausgang[1:]]) +"\"\n") 
-        
-        ## write 5001er
-        fp.write("5001|"+ str(len(self.Eingang[1:])) + "|" + str(len(self.Ausgang[1:])) + "|" + str(len(self.Offset[1:])) + "|" + str(len(self.Speicher[1:])) + "|" + str(self.runStart) + "\n")
-        
-        n=1
-        fp.write("\n\n")
-        for _e in self.Eingang[1:]:
-            fp.write("5002|"+str(n)+"|" +quoteVal(_e) + "|" +str(int(_e['isalpha'] == 1)) + "   ## " + _e['name'] + "\n")
-            n += 1
+        hsbfile=open(fname,"r").read()
+        for (_key,_val,_val_int) in LOGIKVARSSEARCH_REGEX.findall(hsbfile):
+            if _val_int:
+                self.LOGIKVARS[_key] = int(_val_int)
+            else:
+                self.LOGIKVARS[_key] = _val.strip()
 
-        fp.write("\n\n")
-        n=1
-        for _s in self.Speicher[1:]:
-            fp.write("5003|"+str(n)+"|" +quoteVal(_s) + "|" +str(int(_s['remanent'] == 1)) + "   ## \n")
-            n += 1
-        fp.write("\n\n")
-        n=1
-        for _a in self.Ausgang[1:]:
-            fp.write("5004|"+str(n)+"|" +quoteVal(_a) + "|" +str(int(_a['round'] == 1)) + "|" +str(int(_a['sbc'] == 1)) + "|" +str(int(_a['isalpha'] == 1)) + "   ## " + _a['name'] + "\n")
-            n += 1
-        fp.write("\n\n")
-        fp.write("\"\"\")")
+        _preexec = PREEXEC_REGEX.search(hsbfile)
+        if _preexec:
+            console_error("execute PREEXEC")
+            eval(compile(_preexec.group(1),"pre_exec",'exec'))
+        _lines = [""]
+        for line in self.LOGIKVARS["LOGIKDESCRIPTION"].split("\n"):
+            if not line.startswith("#"):
+                line = "## -- {0}".format(line)
+            _lines.append(line)
+        self.LOGIKVARS["LOGIKFILENAME"] = self.LOGIKVARS["LOGIKFILENAME"].format(**self.LOGIKVARS)
+        self.LOGIKVARS["LOGIKDESCRIPTION"] = "\n".join(_lines)
+        hsbfile = LOGIKVARSSEARCH_REGEX.sub("",hsbfile)
+        hsbfile = re.sub("@(" + "|".join(self.LOGIKVARS) + ")@",lambda x,self=self: self.LOGIKVARS.get(x.group(1),""),hsbfile)
 
-        fp.write("\n\n\n\n")
-        for _f in self.Formel:
-            fp.write("LGT.addFormel(\"5012\","+str(_f['dobreak'])+ ",\"" +_f['case']+ "\",\"" +_f['formel'] + "\",\"" +_f['offset']+ "\"," +str(_f['pinAusgang'])+ ","  +str(_f['pinOffset'])+ "," +str(_f['pinSpeicher'])+ ","  +str(_f['pinNegAusgang'])+ ")")
-            fp.write("\n\n")
-        
-        fp.write("\n\n")
-        
-        
+        self.LOGIKSYMBOLS = {}
 
-        fp.write("\n\n#### Compiler und Debugger ####\n")
-        fp.write("Finish()")
+        hsbfile = re.sub("(500([234])[|](\d+)[|].*?#.*?@@(\w+))",self.catch_symbols,hsbfile)
         
-        
-        fp.close()
-    def addFormel(self,_def,_dobreak,_case,_formel,_offset,_pinAusgang,_pinOffset,_pinSpeicher,_pinNegAusgang,ByteCode=0):
-        LineNum = len(self.Formel)
-        numOffset = len(self.Offset)
+        if self.LOGIKSYMBOLS:
+            hsbfile = re.sub("({0})([ACN]?)".format("|".join(self.LOGIKSYMBOLS.keys())), lambda x,symbols=self.LOGIKSYMBOLS: "{0}{1}[{2}]".format(symbols.get(x.group(1))[0],(x.group(2) or "N"),symbols.get(x.group(1))[1]),hsbfile)
+        if self.LOGIKVARS.get("LOGIKDEBUG") == -1:
+            ## remove debug
+            hsbfile = re.sub("###DEBUG###.*?$","",hsbfile)
+        if self.LOGIKVARS.get("LOGIKDEBUG") < 1:
+            ## activate nodebug
+            hsbfile = re.sub("###NODEBUG###","",hsbfile)
+        if self.LOGIKVARS.get("LOGIKDEBUG") == 1:
+            ## activate debug
+            hsbfile = re.sub("###DEBUG###","",hsbfile)
+        else:
+            ## remove console_* functions
+            console_info("remove console_* functions")
+            _remove_console_regex = re.compile("^[\t\s]*console_\w+\(.*?\)$",re.MULTILINE)
+            hsbfile = _remove_console_regex.sub("",hsbfile)
 
-        if len(_case)==0:
-            _case = "True"
-        if re.findall("(?:\(| |\A)EI(?:\Z| |=|\))",_case) and not self.runStart:
-            console_error("\n*** Warnung *** es wird EI als Bedingung gewertet, obwohl der Baustein nicht beim Systemstart startet\n")
-            self.Errors['warning'] += 1
-        for _oc in re.findall("O[C|N]\[(\d+)\]",_case):
-            if int(_oc) > numOffset:
-                console_error("\n*** Warnung *** Timer OC[%s] gefunden aber nur %d Timer definiert\n" % (_oc,numOffset))
-                self.Errors['warning'] += 1
-        _caseCode = compile(_case,"Case-Line:"+str(LineNum),"eval")
-        if len(_formel)==0:
-            _formel = "None"
-        _formelCode = compile(_formel,"Formel-Line:"+str(LineNum),"eval")
-        if len(_offset)==0:
-            _offset = "None"
-        _offsetCode = compile(_offset,"Offset-Line:"+str(LineNum),"eval")
-        if _pinOffset > numOffset:
-            console_error("\n*** Warnung *** Ausgang auf Timer OC[%s] gesetzt aber nur %d Timer definiert\n" % (_pinOffset,numOffset))
-            self.Errors['warning'] += 1
+        codeblocks = []
+        IMPORTSEARCH_REGEX = re.compile("@INCLUDE=(.*?)(?:;([\w+]+)|;)?@",re.MULTILINE)
+        
+        def _import_replacer(match):
+            if match:
+                _file = match.group(1)
+                _type = match.group(2)
+                _type = _type.split("+")
+                _mode = "rt" if len(_type) == 0 else "rb"
+                if not os.path.isfile(_file):
+                    return "##FAILED##"
+                try:
+                    _content = open(_file,_mode).read()
+                    console_info("included {0}".format(_file))
+                except:
+                    console_error("failed include {0}".format(_file))
+                    return "##FAILED##"
+                if "zlib" in _type:
+                    _content = zlib.compress(_content,9)
+                if "base64" in _type or "zlib" in _type:
+                    _content = base64.b64encode(_content)
+                
+                return _content
+                
+        
+        hsbfile = IMPORTSEARCH_REGEX.sub(_import_replacer,hsbfile)
+        
+        for codeblock in BYTECODESEARCH_REGEX.findall(hsbfile):
+            if self.LOGIKVARS.get("LOGIKDEBUG") == -2:
+                ## remove debug
+                try:
+                    codeblock = nocomment(codeblock)
+                except:
+                    console_error("can't remove comments")
+
+            _mode = self.LOGIKVARS.get("LOGIKCOMPILEMODE",1)
+            if _mode == 1:
+                console_info("BASE64")
+                codeblocks.append("eval(compile(__import__('base64').decodestring('{0}'),'<{1}_{2}>','exec'))".format(base64.b64encode(codeblock),self.LOGIKVARS.get("LOGIKFILENAME","NO_NAME"),len(codeblocks)))
+                continue
+
+            if _mode == 2:
+                console_info("BASE64 ZLIB")
+                codeblocks.append("eval(compile(__import__('zlib').decompress(__import__('base64').decodestring('{0}')),'<{1}_{2}>','exec'))".format(base64.b64encode(zlib.compress(codeblock,6)),self.LOGIKVARS.get("LOGIKFILENAME","NO_NAME"),len(codeblocks)))
+                continue
+            
+            _bytecode = marshal.dumps(compile(codeblock,"<{0}_{1}_PY_VER_{2}>".format(self.LOGIKVARS.get("LOGIKFILENAME","NO_NAME"),len(codeblocks),sys.version),"exec"))
+            if _mode == 3:
+                console_info("BYTECODE {0}".format(sys.version[:3]))
+                codeblocks.append("eval(__import__('marshal').loads(__import__('base64').decodestring('{0}')))".format(base64.b64encode(_bytecode)))
+            elif _mode == 4:
+                console_info("BYTECODE {0} ZLIB".format(sys.version[:3]))
+                codeblocks.append("eval(__import__('marshal').loads(__import__('zlib').decompress(__import__('base64').decodestring('{0}'))))".format(base64.b64encode(zlib.compress(_bytecode,6))))
+
+        hsbfile = BYTECODESEARCH_REGEX.sub("",hsbfile)
+        if codeblocks:
+            hsbfile = re.sub("@BYTECODE@",codeblocks.pop(0),hsbfile)
+        _lines = []
+        for line in hsbfile.split("\n"):
+            if len(line.strip()) == 0 or not CLEANUP_REGEX.search(line):
+                _lines.append(line)
+
+        if _lines[0].find("coding") == -1:
+            _lines.insert(0,"# -*- coding: iso-8859-1 -*-")
+        else:
+            _lines[0] = "# -*- coding: iso-8859-1 -*-"
+
+        console_info("Bausteingröße {0} KB".format(float(len("\n".join(_lines)))/1024))
+        self.rawlines = _lines
+        self._HSLparser(self.rawlines)
+        #hsbfile = "\n".join(_lines)
+
+        #hsbfile = re.sub(r"([\r\n])[\s\t]*[\r\n][\s\t]*[\r\n]","\\1\\1",hsbfile)
 
 
-        
-        self.Formel.append(
-          {
-          #'pinAusgang': _pinAusgang,
-          #'pinOffset': _pinOffset,
-          #'pinSpeicher': _pinSpeicher,
-          #'pinNegAusgang': _pinNegAusgang,
-          'dobreak':_dobreak,
-          'line': LineNum,
-          'case':_case,
-          'caseCode':_caseCode,
-          'formel':_formel,
-          'formelCode':_formelCode,
-          'offset':_offset,
-          'offsetCode':_offsetCode,
-          'pinAusgang':_pinAusgang,
-          'pinSpeicher':_pinSpeicher,
-          'pinOffset':_pinOffset,
-          'pinNegAusgang':_pinNegAusgang
-          })
-        ## TODO
-        
+    def catch_symbols(self,match):
+        _var = { "2" : "E", "3" : "S" , "4" : "A" }.get(match.group(2))
+        self.LOGIKSYMBOLS["@@{0}".format(match.group(4))] = (_var,match.group(3))
+        return match.group(1).replace("@@{0}".format(match.group(4)),"")
+
 LGT = LogikGeneratorClass()
 
 def Finish():
-    print (sys.argv)
+    #print (sys.argv)
     LGT._HSLparser(LGT.LogikHeader)
     parseCommandLine()
 
@@ -1806,9 +2092,9 @@ def parseCommandLine():
     _cmds = []
     configFile = os.path.join(sys.path[0],"LogikGen.config")
     argautorun = 0
-    import getopt
+    LGT.readConfig(configFile)
     
-    opts, args = getopt.getopt(sys.argv[1:],"a:n:l:i:b:dg",["autorun=","new=","import=","log=","debug","b64decode","config=","build="])
+    opts, args = getopt.getopt(sys.argv[1:],"a:o:n:l:i:b:c:dg",["autorun=","open=","new=","import=","log=","debug","b64decode","config=","build="])
     for opt,arg in opts:
         if opt in ("-i","--import"):
             if os.path.isfile(arg):
@@ -1822,6 +2108,19 @@ def parseCommandLine():
                     console_error("Kein Import File angegeben")
                 else:
                     console_error("Import File %r nicht gefunden" % arg)
+
+        elif opt in ("-o","--open"):
+            if os.path.isfile(arg):
+                openfilename = arg
+                _configFile = os.path.join( os.path.dirname(arg), "LogikGen.config")
+                if os.path.isfile(_configFile):
+                    configFile = _configFile
+                _cmds.append("open")
+            else:
+                if len(arg) <1:
+                    console_error("Kein HSB File angegeben")
+                else:
+                    console_error("HSB File %r nicht gefunden" % arg)
 
         elif opt in ("-n","--new"):
             _hslinfo = re.findall(".*(1[0-9][0-9][0-9][0-9])_(.*)",arg)
@@ -1855,25 +2154,23 @@ def parseCommandLine():
         elif opt in ("--b64decode"):
             LGT.Options['decode'] = True
 
-        elif opt in ("--config"):
+        elif opt in ("-c","--config"):
             configFile = arg
         else:
             console_error("unbekannte Option")
             sys.exit(0)
     if "import" in _cmds:
         LGT.HSLparser(importfilename)
+
+    if "open" in _cmds:
+        LGT.load(openfilename)
+
     if "build" in _cmds:
         LGT.build(buildfile)
-    if "create" in _cmds:
-        if _logiknum:
-            LGT.LogikNum = _logiknum
-        if _logikname:
-            LGT.LogikName = _logikname
-        LGT.createLGT()
 
     #console(LGT.LogikNum)
     if "debug" in _cmds:
-        LGT.readConfig(configFile)    
+        LGT.readConfig(configFile)
     
     if "autorun" in _cmds:
         LGT.AutoRun = argautorun
@@ -1882,17 +2179,34 @@ def parseCommandLine():
             LGT.connectKOGW()
             time.sleep(0.5)
         LGT.LogikDebug()
+    return LGT
     
-    
+def kill_handler(signum,frame):
+    global LGT
+    if signum in [signal.SIGINT,signal.SIGTERM,signal.SIGBREAK]:
+        LGT.exitall(0)
+
 if __name__ == "__main__":
-    print Fore.WHITE,Back.BLACK,Style.RESET_ALL
+    print Fore.WHITE,Back.BLACK,Style.RESET_ALL,
     try:
-        parseCommandLine()
-    except SystemExit:
+        signal.signal(signal.SIGINT,kill_handler)
+        #signal.signal(signal.SIGBREAK,kill_handler)
+        #signal.signal(signal.SIGTERM,kill_handler)
+        LGT = parseCommandLine()
+    except (KeyboardInterrupt,SystemExit):
         pass
+    except getopt.GetoptError:
+        console_error("Fehlerhafte Befehlszeilenoptionen")
+        console_info("gültige Optionen sind")
+        console_info("-d (--debug) startet den Debugger (immer benutzen)")
+        console_info("-i xxxxx_logik.hsl (--import=) importiert eine .hsl Datei")
+        console_info("-o logik.hsb (--open=) läd eine .hsb Datei")
+        console_info("-a [0|1] (--autorun=) startet die Ausführung automatisch (ohne run)")
+        console_info("-l logfile.txt (--log=) schreibt die Ausgabe des Programms in eine Textdatei")
+        console_info("-g (--kogw) connect zum HS KO-Gateway vor dem Start der Logik")
     except:
         print (Fore.RED + Style.BRIGHT + "Error Prozessing")
         traceback.print_exc(file=sys.stdout)
         time.sleep(5)
-    print Fore.WHITE,Back.BLACK,Style.RESET_ALL,
+        print Fore.WHITE,Back.BLACK,Style.RESET_ALL,
     sys.exit(0)
